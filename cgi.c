@@ -10,6 +10,7 @@
 #include "sws.h"
 
 extern char **environ;
+
 void
 ini_cgi(CGI_ENV *cgi)
 {
@@ -32,15 +33,19 @@ ini_cgi(CGI_ENV *cgi)
 	cgi->server_software = SERVER_NAME;
 }
 
-int
+void
 cgi_parser(CGI_ENV *cgi, REQUEST *req, char *client_ip)
 {
 	int i;
 	int len;
 
+	if (req->status != STAT_NOT_SPECIFIED || req->is_cgi == NOT_SPECIFIED) 
+		return;
+
 	len = strlen(req->query);
 	if (len >= CONTENT_BUFSIZE) {
-		return STAT_BAD_REQUEST;
+		req->status = STAT_BAD_REQUEST;
+		return;
 	}
 
 	sprintf(cgi->content_length, "%d", len);
@@ -55,7 +60,8 @@ cgi_parser(CGI_ENV *cgi, REQUEST *req, char *client_ip)
 		cgi->request_method = "GET";
 		break;
 	default:
-		return STAT_BAD_REQUEST;
+		req->status = STAT_BAD_REQUEST;
+		return;
 	}
 
 	switch (req->ver) {
@@ -66,7 +72,8 @@ cgi_parser(CGI_ENV *cgi, REQUEST *req, char *client_ip)
 		cgi->server_protocol = "HTTP/1.0";
 		break;
 	default:
-		return STAT_BAD_REQUEST;
+		req->status = STAT_BAD_REQUEST;
+		return;
 	}
 
 	len = strlen(req->uri);
@@ -80,8 +87,6 @@ cgi_parser(CGI_ENV *cgi, REQUEST *req, char *client_ip)
 
 	if (i < len)
 		strcpy(cgi->path_info, req->uri + i);
-
-	return STAT_NOT_SPECIFIED;
 }
 
 /*
@@ -91,8 +96,8 @@ cgi_parser(CGI_ENV *cgi, REQUEST *req, char *client_ip)
  * The read end of the pipe is stored in the argument fd.  It needs to be
  * closed by the caller of the function.
  */
-int
-cgi_exec(int *fd, CGI_ENV *cgi)
+void
+cgi_exec(int msgsock, CGI_ENV *cgi)
 {
 	pid_t pid;
 	struct stat st;
@@ -102,33 +107,42 @@ cgi_exec(int *fd, CGI_ENV *cgi)
 
 	sprintf(path, "%s%s", cgi_dir, cgi->script_name + 9);
 	if (stat(path, &st) == -1) {
-		return STAT_NOT_FOUND;
+		return;
 	}
 
 	if (!S_ISREG(st.st_mode)) {
-		return STAT_BAD_REQUEST;
+		return;
 	}
 
 	if (access(path, X_OK) == -1) {
-		return STAT_FORBIDDEN;
+		return;
 	}
 
 	if (pipe(fds) < 0) {
-		return STAT_INTERNAL_SERVER_ERROR;
+		return;
 	}
 
 	if ((pid = fork()) == -1) {
-		return STAT_INTERNAL_SERVER_ERROR;
+		return;
 		
 	} else if (pid > 0) {	/* parent */
 		close(fds[1]);
-		*fd = fds[0];
+
+		/*
+		if (dup2(fds[0], msgsock) == -1)
+			return;
+		*/
+
 		if (waitpid(pid, NULL, 1) < 0) {
-			return STAT_INTERNAL_SERVER_ERROR;
+			return;
 		}
+		
+		int b;
+		while (read(fds[0],&b,1)>0)
+		write(msgsock,&b,1);
+
 	} else {	/* child */
 		close(fds[0]);
-		close(STDIN_FILENO);
 
 		if (dup2(fds[1], STDOUT_FILENO) == -1) {
 			exit(EXIT_FAILURE);
@@ -146,14 +160,12 @@ cgi_exec(int *fd, CGI_ENV *cgi)
 		setenv("SERRVER_PORT", cgi->server_port, 1) == -1 ||
 		setenv("SERVER_PROTOCOL", cgi->server_protocol, 1) == -1||
 		setenv("SERVER_SOFTWARE", cgi->server_software, 1) == -1) {
-			return STAT_INTERNAL_SERVER_ERROR;
+			return;
 		}
 
 		execve(path, a, environ);
 		exit(EXIT_FAILURE);
 	}
-
-	return STAT_NOT_SPECIFIED;
 }
 
 

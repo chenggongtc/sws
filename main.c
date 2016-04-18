@@ -1,28 +1,7 @@
-/*
- * main.c		- main program for `sws` command
- * sws			- a simple web server
- * 
- * CS631 final project	- sws
- * Group 		- flag
- * Members 		- Chenyao Wang, cwang60@stevens.edu
- *			- Dongxu Han, dhan7@stevens.edu
- *			- Gong Cheng, gcheng2@stevens.edu
- *			- Maisi Li, mli27@stevens.edu
- *
- * Usage: ./sws [-dh][-c dir][-i address][-l file][-p port] dir
- */
-
-#ifdef __linux__
-#include <bsd/stdio.h>
-#include <bsd/stdlib.h>
-#include <bsd/string.h>
-#include <bsd/unistd.h>
-#else
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
-#endif
 
 #include <sys/stat.h>
 #include <sys/types.h>
@@ -36,8 +15,6 @@
 #include "sws.h"
 
 #define DEFAULT_PORT "8080"
-#define FILETYPE 0
-#define DIRTYPE 1
 
 /* flags */
 int cflag;	/* CGI */
@@ -46,33 +23,31 @@ int hflag;	/* help */
 int iflag;	/* ip address */
 int lflag;	/* log */
 int pflag;	/* port */
-SERVERINFO server_info;
 char doc_root[PATH_MAX];
 char cgi_dir[PATH_MAX], log_file[PATH_MAX];
 char *server_addr, *port;
-LOG log_info;
-int fd_log;
+char *progname;
 
-void usage();
+static void usage();
+static int check_file(const char *, int);
 
 int
 main(int argc, char **argv)
 {
 	int opt;
 	int len;
-	setprogname(argv[0]);
+	progname = argv[0];
 	(void)setlocale(LC_ALL, "");
-	parse_conf(&server_info);
 	port = DEFAULT_PORT;
 
 	while ((opt = getopt(argc, argv, "c:dhi:l:p:")) != -1) {
 		switch (opt) {
 		case 'c':
 			cflag = 1;
-			strncpy(cgi_dir, optarg, PATH_MAX - 1);
+			/* last character reserved for tailing slash */
+			strncpy(cgi_dir, optarg, PATH_MAX - 2);
 			cgi_dir[PATH_MAX - 1] = '\0';
-			len = strlen(cgi_dir) == PATH_MAX ? PATH_MAX - 1 :
-						strlen(cgi_dir);
+			len = strlen(cgi_dir);
 			/* add a tailing slash */
 			if (len > 0 && cgi_dir[len - 1] != '/')
 				cgi_dir[len] = '/';
@@ -110,17 +85,19 @@ main(int argc, char **argv)
 		return EXIT_FAILURE;
 	}
 
-	strncpy(doc_root, argv[0], PATH_MAX - 1);
+	/* last character reserved for tailing slash */
+	strncpy(doc_root, argv[0], PATH_MAX - 2);
 	doc_root[PATH_MAX - 1] = '\0';
-	len = strlen(doc_root) == PATH_MAX ? PATH_MAX - 1 : strlen(doc_root);
+	len = strlen(doc_root);
 	/* add a tailing slash */
 	if (len > 0 && doc_root[len - 1] != '/')
 		doc_root[len] = '/';
 
 	if (atoi(port) < 1024 || atoi(port) > 65535) {
-		fprintf(stderr, "Port number: %s: Not Valid\n", port);
+		fprintf(stderr, "Port number: %s: Not Valid (1024~65535)\n", port);
 		return EXIT_FAILURE;
 	}
+
 	if (cflag) {
 		if (check_file(cgi_dir, DIRTYPE) == -1) {
 			return EXIT_FAILURE;
@@ -128,7 +105,7 @@ main(int argc, char **argv)
 	}
 
 	if (lflag) {
-		if ((fd_log = check_file(log_file, FILETYPE)) == -1) {
+		if (check_file(log_file, FILETYPE) == -1) {
 			return EXIT_FAILURE;
 		}
 	}
@@ -138,19 +115,19 @@ main(int argc, char **argv)
 	}
 
 	/* debugging */
-	//dflag = 1;
-	//lflag = 0;
+	dflag = 1;
+	lflag = 0;
 
 	start_server();
 
 	return EXIT_SUCCESS;
 }
 
-void
+static void
 usage()
 {
 	fprintf(stderr, "Usage: ./%s [-dh][-c dir][-i address][-l file]"
-			"[-p port] dir\n", getprogname());
+			"[-p port] dir\n", progname);
 	if (hflag) {
 		fprintf(stderr, "-c dir\t\tAllow execution of CGIs from the"
 				"given directory.\n");
@@ -170,25 +147,24 @@ usage()
 }
 
 /*
- * Return -1 on error.
- * If fileType is FILETYPE (the log file), open the file and return the file
- * descriptor.
- * If fileType is DIRTYPE (the document root or CGI directory), return 0 on
- * success(have read permission).
+ * Return -1 on error. Return 0 on success.
  */
-int
+static int
 check_file(const char *pathname, int fileType)
 {
     int fd;
     struct stat st;
     if (fileType == FILETYPE) {	/* log file */
-        if ((fd = open(pathname, O_RDWR | O_CREAT | O_TRUNC, S_IWUSR | S_IRUSR))
+        if ((fd = open(pathname, O_RDWR | O_CREAT | O_APPEND, S_IWUSR | S_IRUSR))
             < 0) {
             fprintf(stderr, "%s: Unable to open Log file: %s\n",
                     pathname, strerror(errno));
             return -1;
         }
-        return fd;
+        
+        (void)close(fd);
+
+        return 0;
     } else {	/* CGI directory or document root */
         if (stat(pathname, &st) < 0) {
             fprintf(stderr, "%s: Unable to stat: %s\n", pathname,

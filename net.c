@@ -1,43 +1,20 @@
-/*
- * net.c		- server setup program for `sws` command
- * sws			- a simple web server
- *
- * CS631 final project	- sws
- * Group 		- flag
- * Members 		- Chenyao Wang, cwang60@stevens.edu
- *			- Dongxu Han, dhan7@stevens.edu
- *			- Gong Cheng, gcheng2@stevens.edu
- *			- Maisi Li, mli27@stevens.edu
- */
-
-
 #include <arpa/inet.h>
 #include <netinet/in.h>
 #include <sys/ioctl.h>
 #include <sys/socket.h>
+#include <sys/wait.h>
 
 #include <errno.h>
 #include <fcntl.h>
 #include <netdb.h>
 #include <signal.h>
-#include <setjmp.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
 
+#include "net.h"
 #include "sws.h"
-sigjmp_buf sig_buf;
-/*handle SIGHUP to restart program*/
-static void 
-sig_usr(int sig) {
-	if(sig == SIGHUP) {
-		parse_conf(&server_info);
-		siglongjmp(sig_buf,1);
-	}
-	return;
-}
-
 
 /* start routine of our web server */
 void
@@ -57,30 +34,14 @@ start_server()
 	 */
 	struct sockaddr_in6 client;
 	char client_ip[INET6_ADDRSTRLEN];
-	int status_code;
 	socklen_t length;
 	pid_t p;
 	RESPONSE resp;
 	REQUEST req;
-	int sig_val;
+	CGI_ENV cgi;
+	LOG log_info;
 
 	on = 1;
-	sock = 1;
-	sig_val = sigsetjmp(sig_buf,1);	
-	if(sig_val != 0) {
-		if(sock > 0)
-			close(sock);
-		port = server_info.si_port;
-/*		if(strcmp(server_info.si_address, "") == 0)
-			server_addr = NULL;
-		else
-			server_addr = server_info.si_address;
-*/	strncpy(doc_root, server_info.si_rootdir, sizeof doc_root);
-		if(strcmp(server_info.si_cflag, "TRUE") == 0)
-			strncpy(cgi_dir, server_info.si_cgidir, sizeof cgi_dir);
-		if(strcmp(server_info.si_lflag, "TRUE") == 0)
-			strncpy(log_file, server_info.si_logpath, sizeof log_file);	
-	}
 
 	if (server_addr == NULL) {	/* listen all ipv4 and ipv6 addresses */
 		if ((sock = socket(AF_INET6, SOCK_STREAM, 0)) == -1) {
@@ -158,8 +119,11 @@ start_server()
 	}
 
 	/* prevent child processes from becoming zombies */
-	signal(SIGCHLD, SIG_IGN);
-	signal(SIGHUP, sig_usr);
+	if (signal(SIGCHLD, chldHandler) == SIG_ERR) {
+		perror("signal() error");
+		exit(EXIT_FAILURE);
+	}
+
 	/* Set main socket to non-blocking mode */
 	if ((sock_flag = fcntl(sock, F_GETFL, 0)) == -1) {
 		perror("fcntl() error");
@@ -171,7 +135,7 @@ start_server()
 		exit(EXIT_FAILURE);
 	}
 
-	if (!dflag) {
+	if (!dflag) { /* test */
 		if (daemon(1, 0) == -1) {
 			perror("daemon() error");
 			exit(EXIT_FAILURE);
@@ -218,49 +182,27 @@ ACCAGAIN:
 
 		if (dflag) {
 			ini_request(&req);
-			status_code = req_parser(msgsock, &req);
-
-			int target_fd;
-			char * res_val;
-
 			ini_response(&resp);
-			resp.status = status_code;
-			if ( (res_val =res_builder(&resp, &req, &target_fd, 
-				(char *)&client_ip)) == NULL){
-				close(msgsock);
-				continue;
-           		 }
-           		if (res_send(res_val, target_fd, msgsock) != 0){
-             			   //perror("res send error");
-         		}
+			ini_cgi(&cgi);
+			req_parser(msgsock, &req, &log_info);
+			cgi_parser(&cgi, &req, client_ip);
+			response(msgsock, &resp, &req, &cgi, &log_info);
+			
+			printf("status: %d, method: %d, uri: %s, query: %s, iscgi: %d, isims: %d, ims: %s\n", 
+			req.status, req.method, req.uri, req.query, req.is_cgi, req.is_ims, asctime(&req.if_modified_since));
 
-			log_info.l_req_stat = resp.status;
-			log_sws(&log_info);
+			printf("curr:%s",ctime(&resp.curr_date));
+			printf("lm:%s",ctime(&resp.lm_date));
+			printf("status: %d, method: %d, server: %s, type: %s, len: %"PRIuMAX", path: %s, lstype: %d\n\n",
+				resp.status, resp.method, resp.server, resp.content_type, resp.content_len, resp.content_path, resp.ls_type);
 			close(msgsock);
-			/* test end */
 		} else {
 			if ((p = fork()) < 0) {
 				close(msgsock);
 			} else if (p == 0) {	/* child */
 				ini_request(&req);
-				status_code = req_parser(msgsock, &req);
-				int target_fd;
-				char * res_val;
+				req_parser(msgsock, &req, &log_info);
 
-				ini_response(&resp);
-				resp.status = status_code;
-				if ((res_val =res_builder(&resp, &req, 
-					&target_fd,
-					(char *)&client_ip)) == NULL){
-					close(msgsock);
-					continue;
-           			 }
-           			if (res_send(res_val, target_fd, msgsock) != 0){
-             			   //perror("res send error");
-         			}
-
-				log_info.l_req_stat = resp.status;
-				log_sws(&log_info);
 				close(msgsock);
 				_exit(EXIT_SUCCESS);
 			} else	/* parent */
@@ -269,4 +211,9 @@ ACCAGAIN:
 	}
 }
 
-
+static void
+chldHandler(int signo) {
+	int status;
+	while (waitpid(-1, &status, WNOHANG) > 0) {
+	}
+}

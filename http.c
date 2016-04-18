@@ -1,19 +1,12 @@
-/*
- * http.c		- handle http request and response for `sws` command
- * sws			- a simple web server
- *
- * CS631 final project	- sws
- * Group 		- flag
- * Members 		- Chenyao Wang, cwang60@stevens.edu
- *			- Dongxu Han, dhan7@stevens.edu
- *			- Gong Cheng, gcheng2@stevens.edu
- *			- Maisi Li, mli27@stevens.edu
- */
+#include <sys/stat.h>
 
 #include <errno.h>
+#include <fts.h>
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
+#include <sys/types.h>
+
 #include <time.h>
 #include <unistd.h>
 #include <strings.h>
@@ -28,6 +21,7 @@ void
 ini_request(REQUEST *req)
 {
 	req->method = UNKNOW_METHOD;
+	req->status = STAT_NOT_SPECIFIED;
 	bzero(req->uri, sizeof(req->uri));
 	bzero(req->raw_uri, sizeof(req->raw_uri));
 	bzero(req->query, sizeof(req->query));
@@ -35,6 +29,7 @@ ini_request(REQUEST *req)
 	req->is_ims = NOT_SPECIFIED;
 	req->is_cgi = NOT_SPECIFIED;
 	memset(&(req->if_modified_since), 0, sizeof(req->if_modified_since));
+	req->if_modified_since.tm_isdst = -1;
 }
 
 /*
@@ -44,22 +39,21 @@ void
 ini_response(RESPONSE *resp)
 {
 	resp->method = UNKNOW_METHOD;
-	resp->status = 0;
-	memset(&(resp->date), 0, sizeof(resp->date));
+	resp->status = STAT_NOT_SPECIFIED;
+	resp->curr_date = (time_t)(-1);
 	resp->server = SERVER_NAME;
-	memset(&(resp->lm_date), 0, sizeof(resp->lm_date));
+	resp->lm_date = (time_t)(-1);
 	resp->content_type = CONTENT_TYPE;
 	resp->content_len = 0;
-	bzero(resp->content_path,sizeof(resp->content_path));
-	resp->ls_type = REGFILE;
+	bzero(resp->content_path, sizeof(resp->content_path));
+	resp->ls_type = FILETYPE;
 }
 
 /*
- * Return STAT_NOT_SPECIFIED on success, or the corresponding status code
- * on error.
+ * Parse request.
  */
-int
-req_parser(int msgsock, REQUEST *req)
+void
+req_parser(int msgsock, REQUEST *req, LOG *log_info)
 {
 	int is_req_line;
 	int is_cr;
@@ -68,7 +62,6 @@ req_parser(int msgsock, REQUEST *req)
 	char ch;
 	int n;
 	int i;
-	int status_code;
 	clock_t timeout;
 
 	is_req_line = 0;
@@ -78,21 +71,29 @@ req_parser(int msgsock, REQUEST *req)
 	timeout = clock();
 REQAGAIN:
 	while ((n = read(msgsock, &ch, 1)) > 0) {
-		if (i == MAX_REQUEST_LEN - 1) {
+		if (i == MAX_REQUEST_LEN - 1) { /* request too long */
 			buffer[i] = '\0';
-			if (time(&log_info.l_time) == (time_t)(-1))
-				return STAT_INTERNAL_SERVER_ERROR;
 
-			strcpy(log_info.l_line, buffer);
-			return STAT_BAD_REQUEST;
+			strcpy(log_info->l_line, buffer);
+
+			if (time(&log_info->l_time) == (time_t)(-1)) {
+				req->status = STAT_INTERNAL_SERVER_ERROR;
+				return;
+			}
+
+			req->status = STAT_BAD_REQUEST;
+			return;
 		}
 
 		if (ch == '\n') { /* LF */
 			if (!is_cr) { /* CR isn't read */
-				if (time(&log_info.l_time) == (time_t)(-1))
-					return STAT_INTERNAL_SERVER_ERROR;
+				if (time(&log_info->l_time) == (time_t)(-1)) {
+					req->status = STAT_INTERNAL_SERVER_ERROR;
+					return;
+				}
 
-				return STAT_BAD_REQUEST;
+				req->status = STAT_BAD_REQUEST;
+				return;
 			}
 
 			if (i == 1) { /* a new CRLF is received */
@@ -109,19 +110,24 @@ REQAGAIN:
 			if (is_req_line == 0) { /* request line */
 				buffer[i] = '\n';
 				buffer[i + 1] = '\0';
-				strncpy(log_info.l_line, buffer, i - 1);
-				status_code = req_line_parser(buffer, req);
+				/* remove tailing CRLF */
+				strncpy(log_info->l_line, buffer, i - 1);
+				log_info->l_line[i] = '\0';
 
-				if (status_code != STAT_NOT_SPECIFIED) {
-					if (time(&log_info.l_time) ==
-							(time_t)(-1))
-					return STAT_INTERNAL_SERVER_ERROR;
-				return status_code;
+				req_line_parser(buffer, req);
+
+				if (req->status != STAT_NOT_SPECIFIED) {
+					if (time(&log_info->l_time) ==
+							(time_t)(-1)) {
+						req->status = STAT_INTERNAL_SERVER_ERROR;
+					}			
+					return;
 				}
+
 				is_req_line = 1;
 				bzero(buffer,sizeof(buffer));
 				i = 0;
-			} else if (is_cr) {
+			} else {
 				buffer[i] = '\n';
 				buffer[i + 1] = '\0';
 				if (strncmp(buffer, "If-Modified-Since:", 18)
@@ -145,19 +151,24 @@ REQAGAIN:
 	if (n < 0) {
 		if (errno == EBLOCK) {
 			if(((clock() - timeout) / CLOCKS_PER_SEC) > 60) {
-				if (time(&log_info.l_time) == (time_t)(-1))
-					return STAT_INTERNAL_SERVER_ERROR;
+				if (time(&log_info->l_time) == (time_t)(-1)) {
+					req->status = STAT_INTERNAL_SERVER_ERROR;
+					return;
+				}
 
-				return STAT_REQUEST_TIMEOUT;
+				req->status = STAT_REQUEST_TIMEOUT;
+				return;
 			} else
 				goto REQAGAIN;
 		}
 
-		if (time(&log_info.l_time) == (time_t)(-1))
-			return STAT_INTERNAL_SERVER_ERROR;
+		if (time(&log_info->l_time) == (time_t)(-1)) {
+			req->status = STAT_INTERNAL_SERVER_ERROR;
+			return;
+		}
 
-		return STAT_INTERNAL_SERVER_ERROR;
-
+		req->status = STAT_INTERNAL_SERVER_ERROR;
+		return;
 	}
 
 
@@ -166,20 +177,38 @@ REQAGAIN:
 	else if (n == -1)
 		req->is_ims = NOT_SPECIFIED;
 	else
-		status_code = STAT_INTERNAL_SERVER_ERROR;
+		req->status = STAT_INTERNAL_SERVER_ERROR;
 
-	if (time(&log_info.l_time) == (time_t)(-1))
-		return STAT_INTERNAL_SERVER_ERROR;
+	if (time(&log_info->l_time) == (time_t)(-1)) {
+		req->status = STAT_INTERNAL_SERVER_ERROR;
+		return;
+	}
 
-	return status_code;
+}
+
+void
+response(int msgsock, RESPONSE *resp, REQUEST *req, CGI_ENV *cgi, 
+		LOG *log_info) {
+	int flag;
+
+	resp_header_generator(resp, req);
+
+	flag = send_header(msgsock, resp, req->is_cgi);
+
+	log_info->status = resp->status;
+	log_info->size = resp->content_len;
+
+	if (flag == -1)
+		return;
+
+	send_content(msgsock, resp, cgi, req->is_cgi);
+
 }
 
 /*
  * Parse the request line.
- * Return STAT_NOT_SPECIFIED on success, or the corresponding status code
- * on error.
  */
-static int
+static void
 req_line_parser(char *req_line, REQUEST *req)
 {
 	char method[7];		/* HEAD or GET */
@@ -188,23 +217,22 @@ req_line_parser(char *req_line, REQUEST *req)
 	char uri[URI_BUFSIZE];
 	char version[9];	/* HTTP/1.0 or HTTP/0.9 */
 	int n;
-	int status_code;
 	int ret_val;
-
-	status_code = STAT_NOT_SPECIFIED;
 
 	if ((n = sscanf(req_line,
 			/*Method   SP URI   SP HTTP-Version CRLF */
 			"%6[A-Z]%c %4095s%c %8[HTP/.019] %1[^\r\n]",
 			method, &sp1, uri, &sp2, version, garbage)) == EOF) {
 		if (errno != 0)
-			return STAT_INTERNAL_SERVER_ERROR;
+			req->status = STAT_INTERNAL_SERVER_ERROR;
 		else
-			return STAT_BAD_REQUEST;
+			req->status = STAT_BAD_REQUEST;
+		return;
 	}
 	/* garbage should not match any character, so n equals 5 instead of 6 */
 	else if (n == 0 || n == 6) {
-		return STAT_BAD_REQUEST;
+		req->status = STAT_BAD_REQUEST;
+		return;
 	} else {
 		if (n >= 1) {
 			if (strcmp(method, "GET") == 0) {
@@ -219,32 +247,37 @@ req_line_parser(char *req_line, REQUEST *req)
 					(strcmp(method, "DELETE") == 0) ||
 					(strcmp(method, "LINK") == 0) ||
 					(strcmp(method, "UNLINK") == 0)) {
-					status_code = STAT_NOT_IMPLEMENTED;
+					req->status = STAT_NOT_IMPLEMENTED;
 				}
 				else {
-					return STAT_BAD_REQUEST;
+					req->status = STAT_BAD_REQUEST;
+					return;
 				}
 			}
 		}
 
 		if (n >= 2)
 			if (sp1 != SP) {
-				return STAT_BAD_REQUEST;
+				req->status = STAT_BAD_REQUEST;
+				return;
 			}
 
 		if (n >= 3) {
             strcpy(req->raw_uri, uri);
 			ret_val = uri_process(uri, req);
 			if (ret_val == -1) {
-				return STAT_BAD_REQUEST;
+				req->status = STAT_BAD_REQUEST;
+				return;
 			} else if (ret_val == -2) {
-				return STAT_FORBIDDEN;
+				req->status = STAT_FORBIDDEN;
+				return;
 			}
 		}
 
 		if (n >= 4)
 			if (sp2 != SP) {
-				return STAT_BAD_REQUEST;
+				req->status = STAT_BAD_REQUEST;
+				return;
 			}
 
 		if (n == 5) {
@@ -254,382 +287,23 @@ req_line_parser(char *req_line, REQUEST *req)
 				req->ver = HTTP09;
 			else {
 				req->ver = UNKNOW_VER;
-				return STAT_BAD_REQUEST;
+				req->status = STAT_BAD_REQUEST;
+				return;
 			}
 
 			/* end up with CRLF */
 			if (strcmp(req_line + strlen(req_line) - 2, CRLF)
 				== 0) {
-				return status_code;
+				return;
 			} else {
-				return STAT_BAD_REQUEST;
+				req->status = STAT_BAD_REQUEST;
+				return;
 			}
 		}
 
-		return  STAT_BAD_REQUEST;
+		req->status = STAT_BAD_REQUEST;
 	}
 }
-
-/*
- * generate the http header string of response message
- *
- * return null if internally failed, otherwise return
- * string contains http header with certain status code
- */
-
-char *
-res_builder(RESPONSE * resp, REQUEST * req, int * fd, char * c_ip)
-{
-	char * header;
-	int status;
-	FILE_TYPE * filelist = NULL;
-	struct tm * p, * lm_datetime = NULL;
-	time_t timep;
-	CGI_ENV cgi;
-	int cgi_fd;
-	char * ptr1, * ptr2, *ptr3;	
-
-
-
-
-    if ((header = malloc(1024*sizeof(char))) == NULL){
-        resp->status = STAT_INTERNAL_SERVER_ERROR;
-        return NULL;
-    }
-	header[0] = '\0';
-	if (req->is_ims == SPECIFIED) {
-		if (get_lm_datetime(req->uri, lm_datetime) != 0){
-			resp->status = STAT_INTERNAL_SERVER_ERROR;
-		}
-		else{
-			resp->lm_date = *lm_datetime;
-            if (mktime(lm_datetime) < mktime(&req->if_modified_since))
-                resp->status = STAT_NOT_MODIFIED;
-		}
-	}
-
-	if ((resp->status == STAT_NOT_SPECIFIED) && (req->is_cgi != SPECIFIED)){
-		if ((status = open_file(req->uri, resp, fd)) != STAT_OK) {
-			if (STAT_DIR_LIST == status) {
-				resp->ls_type = DIRINDEX;
-				*fd = 0;
-				if ((status = disp_dir(req->uri, &filelist)) != 0){
-					//perror("Directory indexing error");
-					resp->status = STAT_FORBIDDEN;
-				}
-                else
-                    resp->status = STAT_OK;
-			}
-			else
-                resp->status = status;
-		}
-		else
-            resp->status = STAT_OK;
-	}
-
-	time(&timep);
-	p = gmtime(&timep);
-
-	if (req->ver == HTTP09){
-		if (resp->status != STAT_OK){
-			if ((ptr2 = print_err(resp->status)) == NULL)
-				resp->status = STAT_INTERNAL_SERVER_ERROR;
-			else{
-				*fd = 0;
-				strcat(header, ptr2);
-			}
-		}
-		else if (resp->ls_type == DIRINDEX){
-			if ((ptr3 = res_dir_gen((char *)&req->raw_uri, filelist)) == NULL){
-				return NULL;
-			}
-			else
-				strcat(header, ptr3);
-		}
-
-		return header;
-	}
-
-	resp->method = req->method;
-	resp->date = *p;
-	resp->server = SERVER_NAME;
-	if (resp->method == HEAD)
-        *fd = 0;
-
-	if ( (ptr1 = res_gen_1(resp)) == NULL){
-		return NULL;
-	}
-
-    if (resp->status >= 304){
-        strcat(header, ptr1);
-        *fd = 0;
-		if ((ptr2 = res_gen_2(resp)) == NULL){
-            resp->status = STAT_INTERNAL_SERVER_ERROR;
-            return NULL;
-		}
-		else
-			strcat(header, ptr2);
-        if ((ptr3 = print_err(resp->status)) == NULL)
-            resp->status = STAT_INTERNAL_SERVER_ERROR;
-        else
-            strcat(header, ptr3);
-        return header;
-    }
-
-	if ((resp->ls_type == DIRINDEX)){
-            if ((ptr3 = res_dir_gen((char *)&req->raw_uri, filelist)) == NULL){
-                    return NULL;
-            }
-			resp->content_len = strlen(ptr3);
-	}
-
-	if (req->is_cgi != SPECIFIED){
-		if ((ptr2 = res_gen_2(resp)) == NULL){
-            resp->status = STAT_INTERNAL_SERVER_ERROR;
-            return NULL;
-		}
-
-		else{
-            strcat(header, ptr1);
-            strcat(header, ptr2);
-            if ((resp->ls_type == DIRINDEX) && (resp->method != HEAD)){
-                strcat(header, ptr3);
-            }
-            return header;
-		}
-	}
-	else{
-  	        ini_cgi(&cgi);
-   	     if ((status = cgi_parser(&cgi, req, c_ip)) != STAT_NOT_SPECIFIED){
-            //perror("CGI parse error");
-       		     resp->status = status;
-	        }
-     		if ((status = cgi_exec(&cgi_fd, &cgi)) != STAT_NOT_SPECIFIED){
-            //perror("CGI exec error");
-       		     resp->status = status;
-	        }
-		if (req->method != HEAD)
- 		     *fd = cgi_fd;
-	        else
-  	     	     *fd = 0;
-
-		if (resp->status == STAT_NOT_SPECIFIED)
-			resp->status = STAT_OK;
-		if ( (ptr1 = res_gen_1(resp)) == NULL){
-			//perror("Response generate 1 error");
-			return NULL;
-		}
-
-		if (resp->status >= 304){
-			strcat(header, ptr1);
-			strcat(header, CRLF);
-			*fd = 0;
-			if ((ptr2 = print_err(resp->status)) == NULL)
-				resp->status = STAT_INTERNAL_SERVER_ERROR;
-			else
-				strcat(header, ptr2);
-			return header;
-		}
-
-	        strcat(header, ptr1);
-		return header;
-	}
-}
-
-/*
- * Print html code for display of directory index
- */
-char *
-res_dir_gen(char * uri, FILE_TYPE * f_list)
-{
-    char * ret_val;
-    char tmp[ITEM_MAX_SIZE];
-    char tmp1[ITEM_MAX_SIZE];
-    char * tmp_ptr;
-
-    if ((ret_val = malloc(DIRLISTSIZE*sizeof(char))) == NULL){
-        return NULL;
-    }
-    memset(ret_val, 0, DIRLISTSIZE);
-
-    memset(tmp, 0, ITEM_MAX_SIZE);
-    strcat(ret_val, "<!DOCTYPE html>\r\n<html>");
-    sprintf(tmp, "<head><meta charset=\"utf-8\"><title>Index of %s</title></head>", uri);
-    strcat(ret_val, tmp);
-    memset(tmp, 0, ITEM_MAX_SIZE);
-    sprintf(tmp, "<body><h1>Index of %s</h1><hr><table>", uri);
-    strcat(ret_val, tmp);
-
-    memset(tmp, 0, ITEM_MAX_SIZE);
-    sprintf(tmp, "<tr><td><a href=\"%s/\">%s/</a></td></tr><br />", "..", "..");
-    strcat(ret_val, tmp);
-    while (f_list != NULL){
-        memset(tmp, 0, ITEM_MAX_SIZE);
-        memset(tmp1, 0, ITEM_MAX_SIZE);
-        if (f_list->type == REGFILE)
-            sprintf(tmp, "<tr><td><a href=\"%-s\">%s</a></td>", 
-				f_list->name, f_list->name);
-        else
-            sprintf(tmp, "<tr><td><a href=\"%s/\">%s/</a></td>", 
-				f_list->name, f_list->name);
-        sprintf(tmp1, "%s", tmp);
-        strcat(ret_val, tmp1);
-        tmp_ptr = res_datetime_format(f_list->modified_datetime);
-        sprintf(tmp, "<td>%s</td>", tmp_ptr);
-        strcat(ret_val, tmp);
-        sprintf(tmp, "<td align=\"right\">%d</td></tr>\n", f_list->size);
-        strcat(ret_val, tmp);
-        f_list = f_list->next;
-    }
-
-    strcat(ret_val, "</table><hr></body></html>\0");
-    return ret_val;
-}
-
-/*
- * Generate first part of response header
- *
- * Used for cgi handle, general file return and directory listing
- */
-char *
-res_gen_1(RESPONSE * resp)
-{
-	char status_line[20];
-	char status_code[10];
-	char * dt;
-	char tmp[ITEM_MAX_SIZE];
-	char * ret;
-
-
-    if ((ret = malloc(ITEM_MAX_SIZE*sizeof(char))) == NULL){
-        resp->status = STAT_INTERNAL_SERVER_ERROR;
-        return NULL;
-    }
-	memset(tmp, 0, ITEM_MAX_SIZE);
-	memset(ret, 0, ITEM_MAX_SIZE);
-	memset(status_line, 0, 20);
-	memset(status_line, 0, 10);
-
-	strcpy(status_line, "HTTP/1.0 ");
-	sprintf(status_code, "%d%s", resp->status, CRLF);
-	strcat(status_line, status_code);
-	strcat(ret, status_line);
-
-	dt = res_datetime_format(resp->date);
-	sprintf(tmp, "Date: %s%s",dt, CRLF);
-	strcat(ret, tmp);
-	memset(tmp, 0, ITEM_MAX_SIZE);
-
-	sprintf(tmp, "Server: %s%s",resp->server, CRLF);
-	strcat(ret, tmp);
-	memset(tmp, 0, ITEM_MAX_SIZE);
-
-    if (resp->lm_date.tm_year != 0){
-        dt = res_datetime_format(resp->lm_date);
-        sprintf(tmp, "Last-Modified: %s%s",dt, CRLF);
-        strcat(ret, tmp);
-        memset(tmp, 0, ITEM_MAX_SIZE);
-    }
-
-	return ret;
-}
-
-/*
- * Generate second part of response header
- *
- * Used for general file return only
- */
-char *
-res_gen_2(RESPONSE * resp)
-{
-	char tmp[ITEM_MAX_SIZE];
-	char * ret;
-
-    if ((ret = malloc(ITEM_MAX_SIZE*sizeof(char))) == NULL){
-        resp->status = STAT_INTERNAL_SERVER_ERROR;
-        return NULL;
-    }
-	memset(tmp, 0, ITEM_MAX_SIZE);
-
-	sprintf(tmp, "Content-Type: %s%s",resp->content_type, CRLF);
-	strcat(ret, tmp);
-	memset(tmp, 0, ITEM_MAX_SIZE);
-
-	sprintf(tmp, "Content-Length: %d%s",(int)resp->content_len, CRLF);
-	strcat(ret, tmp);
-	memset(tmp, 0, ITEM_MAX_SIZE);
-
-	strcat(ret, CRLF);
-
-	return ret;
-
-}
-
-/*
- * Generate the datetime format used for http header
- *
- * Return the string contains formatted datetime in GMT
- */
-char *
-res_datetime_format(struct tm lm)
-{
-	char *wday[] = {"Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"};
-	char *month[] = {"Jan", "Feb", "Mar", "Apr", "May", "Jun",
-					 "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"};
-	char *ret_val = malloc(30*sizeof(char));
-	sprintf(ret_val, "%s, %d %s %d:%d:%d GMT", wday[lm.tm_wday],
-			lm.tm_mday, month[lm.tm_mon], lm.tm_hour,
-			lm.tm_min, lm.tm_sec);
-	return ret_val;
-}
-
-/*
- * Send the disposed data back to browser
- *
- * Read entity body directly from file describer so that
- * can handle big file by sending its small chunk
- * each time
- */
-int
-res_send(char * ret, int fd, int msgsock)
-{
-	char buff[SENDBUFFSIZE+1];
-	int offset = 0, inc_val;
-	int n, head_len, total_len;
-
-    head_len = strlen(ret);
-	if (head_len != 0){
-		do{
-            if (offset + SENDBUFFSIZE > head_len)
-                inc_val = head_len - offset;
-            else
-                inc_val = SENDBUFFSIZE;
-			if ((n = write(msgsock, ret+offset, inc_val)) <= 0){
-				//perror("header response send error");
-				return 1;
-			}
-			if (n != SENDBUFFSIZE)
-                break;
-			offset += SENDBUFFSIZE;
-		} while (offset-SENDBUFFSIZE <= head_len);
-	}
-    total_len = head_len;
-    if (fd != 0){
-        while ((n = read(fd, buff, SENDBUFFSIZE)) > 0){
-            if (write(msgsock, buff, n) <= 0){
-                //perror("content response send error");
-                (void)close(fd);
-                return 1;
-            }
-            total_len += n;
-        }
-        (void)close(fd);
-    }
-    log_info.l_size = total_len;
-
-    return 0;
-}
-
 
 /*
  * Parse the If-Modified-Since header.
@@ -1036,4 +710,591 @@ convert_month(char *month)
 		return -1;
 }
 
+static void
+resp_header_generator(RESPONSE *resp, REQUEST *req) {
+	struct stat st, index_st;
+	int len;
+	char index_path[PATH_MAX];
+	time_t ims;
 
+	resp->method = req->method;
+	resp->status = req->status;
+	time(&resp->curr_date);
+	gmt_transfer(&resp->curr_date);
+
+	if (resp->status != STAT_NOT_SPECIFIED) {
+		err_header_generator(resp);
+		return;
+	}
+
+	resp->status = STAT_OK;
+
+	strncpy(resp->content_path, req->uri, PATH_MAX - 1);
+	resp->content_path[PATH_MAX - 1] = '\0';
+
+	/* not exist */
+	if (access(resp->content_path, F_OK) != 0) {
+		resp->status = STAT_NOT_FOUND;
+		err_header_generator(resp);
+		return;
+	}
+
+	if (stat(resp->content_path, &st) < 0) {
+		resp->status = STAT_INTERNAL_SERVER_ERROR;
+		err_header_generator(resp);
+		return;
+	}
+
+	/* not a regular file or a directory */
+	if (!S_ISREG(st.st_mode) && !S_ISDIR(st.st_mode)) {
+		resp->status = STAT_FORBIDDEN;
+		err_header_generator(resp);
+		return;
+	}
+
+	/* file */
+	if (S_ISREG(st.st_mode)) {
+		if (req->is_cgi == SPECIFIED) {
+			if (access(resp->content_path, X_OK) != 0) {
+				resp->status = STAT_FORBIDDEN;
+				err_header_generator(resp);
+				return;
+			}
+			return;
+		}
+
+		/* read permission denied */
+		if (access(resp->content_path, R_OK) != 0) {
+			resp->status = STAT_FORBIDDEN;
+			err_header_generator(resp);
+			return;
+		}
+
+		resp->lm_date = st.st_mtime;
+		gmt_transfer(&resp->lm_date);
+		resp->content_len = (uintmax_t)st.st_size;
+
+		/* If-Modified-Since */
+		if (req->method == GET && req->is_ims == SPECIFIED) {
+			ims = mktime(&req->if_modified_since);
+			if (ims < resp->curr_date && resp->lm_date < ims) {
+				resp->status = STAT_NOT_MODIFIED;
+				err_header_generator(resp);
+				return;
+			}
+		}
+		return;
+	}
+
+	/* directory */
+	if (req->is_cgi == SPECIFIED) {
+		resp->status = STAT_FORBIDDEN;
+		err_header_generator(resp);
+		return;
+	}
+
+	len = strlen(resp->content_path);
+	if (len < PATH_MAX - 1 && resp->content_path[len - 1] != '/') {
+		snprintf(index_path, PATH_MAX - 1, "%s/index.html", 
+				resp->content_path);
+	} else {
+		snprintf(index_path, PATH_MAX - 1, "%sindex.html",
+				resp->content_path);
+	}
+
+	if (access(index_path, F_OK) == 0) {
+		if (stat(index_path, &index_st) < 0) {
+			resp->status = STAT_INTERNAL_SERVER_ERROR;
+			err_header_generator(resp);
+			return;		
+		}
+
+		/* index.html exists in the directory */
+		if (S_ISREG(index_st.st_mode)) {
+			/* index.html read permission denied */
+			if (access(index_path, R_OK) != 0) {
+				resp->status = STAT_FORBIDDEN;
+				err_header_generator(resp);
+				return;
+			}
+
+			strcpy(resp->content_path, index_path);
+			resp->lm_date = index_st.st_mtime;
+			gmt_transfer(&resp->lm_date);
+			resp->content_len = (uintmax_t)index_st.st_size;
+
+			/* If-Modified-Since */
+			if (req->method == GET && req->is_ims == SPECIFIED) {
+				ims = mktime(&req->if_modified_since);
+				if (ims < resp->curr_date && resp->lm_date < ims) {
+					resp->status = STAT_NOT_MODIFIED;
+					err_header_generator(resp);
+					return;
+				}
+			}
+			return;
+		}
+		
+	}
+
+	/* index.html not exist in the directory, show the list of 
+	 * files in the directory.
+	 */
+
+	 /* read permission denied */
+	if (access(resp->content_path, R_OK) != 0) {
+		resp->status = STAT_FORBIDDEN;
+		err_header_generator(resp);
+		return;
+	}
+
+	resp->ls_type = DIRTYPE;
+	resp->lm_date = st.st_mtime;
+	gmt_transfer(&resp->lm_date);
+	resp->content_len = (uintmax_t)dir_content_len(resp->content_path);
+	if (resp->content_len == -1) {
+		resp->status = STAT_INTERNAL_SERVER_ERROR;
+		err_header_generator(resp);
+	}
+
+}
+
+static void
+err_header_generator(RESPONSE *resp) {
+	resp->content_len = (uintmax_t)err_length(resp->status);
+}
+
+/* return -1 when internal server errors occur,
+ * otherwise return the length of the content
+ */
+static off_t
+dir_content_len(char *path) {
+	off_t len;
+	off_t frame, file, directory;
+	FTS *handle;
+	FTSENT *list, *child;
+	char *argv[] = {path, NULL};
+
+	frame = (off_t)strlen("<!DOCTYPE html>\r\n"
+			"<html>\r\n"
+			"\t<head>\r\n"
+			"\t\t<title></title>\r\n"
+			"\t</head>\r\n"
+			"\t<body>\r\n"
+			"\t\t<h1></h1>\r\n"
+			"\t\t<ul>\r\n"
+			"\t\t</ul>\r\n"
+			"\t</body>\r\n"
+			"</html>\r\n");
+
+	file = (off_t)strlen("\t\t\t<li></li>\r\n");
+	directory = (off_t)strlen("\t\t\t<li><a href=\"\"></a></li>\r\n");
+
+	len = frame + 2 * strlen(path);
+
+	if ((handle = fts_open(argv, FTS_SEEDOT, fts_cmp)) == NULL) {
+		return -1;
+	}
+
+	while ((child = fts_read(handle)) != NULL) {
+		if (child->fts_info == FTS_ERR || child->fts_info == FTS_NS
+			|| child->fts_info == FTS_DC || child->fts_info == FTS_DNR) {
+			fts_close(handle);
+			return -1;
+		}
+
+		if (child->fts_info == FTS_D || child->fts_info == FTS_DOT) {
+			if ((list = fts_children(handle,0)) == NULL) {
+				if (errno == 0) { /* empty directory */
+					break;
+				} else {
+					fts_close(handle);
+					return -1;
+				}
+			}
+
+			for (; list != NULL; list = list->fts_link) {
+				if (list->fts_info == FTS_ERR || list->fts_info == FTS_NS || 
+					list->fts_info == FTS_DC || list->fts_info == FTS_DNR) {
+					fts_close(handle);
+					return -1;
+				}
+				if (list->fts_info == FTS_DP) {
+					continue;
+				}
+
+				if (list->fts_info == FTS_D || list->fts_info == FTS_DOT) {
+					len += 2 * list->fts_namelen + directory;
+				} else {
+					len += list->fts_namelen + file;
+				}
+			}
+
+			if (fts_set(handle, child, FTS_SKIP) == -1) {
+				fts_close(handle);
+				return -1;
+			}
+		}
+	}
+
+	fts_close(handle);
+	return len;
+}
+
+static int
+fts_cmp(const FTSENT **p, const FTSENT **q)
+{
+	unsigned short info_p, info_q;
+
+	info_p = (*p)->fts_info;
+	info_q = (*q)->fts_info;
+
+	/* error file comes first */
+	if (info_p == FTS_ERR)
+		return  -1;
+	else if (info_q == FTS_ERR)
+		return 1;
+	else if (info_p == FTS_NS || info_q == FTS_NS) {
+		if (info_q != FTS_NS)
+			return -1;
+		else if (info_p != FTS_NS)
+			return 1;
+
+		return cmp_lexico(*p, *q);
+
+	}
+
+	if (info_p == FTS_DOT && info_q == FTS_DOT) {
+		return cmp_lexico(*p, *q);
+	} else if (info_p == FTS_DOT) {
+		return -1;
+	} else if (info_q == FTS_DOT) {
+		return 1;
+	}
+
+	if (info_p == FTS_D && info_q != FTS_D) {
+		return -1;
+	} else if (info_p != FTS_D && info_q == FTS_D) {
+		return 1;
+	}
+
+	return cmp_lexico(*p, *q);
+
+}
+
+static int
+cmp_lexico(const FTSENT *p, const FTSENT *q)
+{
+	return strcmp(p->fts_name, q->fts_name);
+}
+
+static void
+gmt_transfer(time_t *t) {
+	time_t p;
+
+	p = *t;
+	*t = mktime(gmtime(&p));
+}
+
+static int
+send_header(int msgsock, RESPONSE *resp, int cgi) {
+	int len;
+	char str[100];
+
+	/* status line */
+	if (write_str(msgsock, "HTTP/1.0 ") == -1)
+		return -1;
+
+	switch (resp->status) {
+		case STAT_OK:
+			if (write_str(msgsock, "200 OK\r\n") == -1)
+				return -1;
+			break;
+		case STAT_CREATED:
+			if (write_str(msgsock, "201 Created\r\n") == -1)
+				return -1;
+			break;
+		case STAT_ACCEPTED:
+			if (write_str(msgsock, "202 Accepted\r\n") == -1)
+				return -1;
+			break;
+		case STAT_NO_CONTENT:
+			if (write_str(msgsock, "204 No Content\r\n") == -1)
+				return -1;
+			break;
+		case STAT_MOVED_PERMANENTLY:
+			if (write_str(msgsock, "301 Moved Permanently\r\n") == -1)
+				return -1;
+			break;
+		case STAT_MOVED_TEMPORARILY:
+			if (write_str(msgsock, "302 Moved Temporarily\r\n") == -1)
+				return -1;
+			break;
+		case STAT_NOT_MODIFIED:
+			if (write_str(msgsock, "304 Not Modified\r\n") == -1)
+				return -1;
+			break;
+		case STAT_BAD_REQUEST:
+			if (write_str(msgsock, "400 Bad Request\r\n") == -1)
+				return -1;
+			break;
+		case STAT_UNAUTHORIZED:
+			if (write_str(msgsock, "401 Unauthorized\r\n") == -1)
+				return -1;
+			break;
+		case STAT_FORBIDDEN:
+			if (write_str(msgsock, "403 Forbidden\r\n") == -1)
+				return -1;
+			break;
+		case STAT_NOT_FOUND:
+			if (write_str(msgsock, "404 Not Found\r\n") == -1)
+				return -1;
+			break;
+		case STAT_REQUEST_TIMEOUT:
+			if (write_str(msgsock, "408 Request Timeout\r\n") == -1)
+				return -1;
+			break;
+		case STAT_INTERNAL_SERVER_ERROR:
+			if (write_str(msgsock, "500 Internal Server Error\r\n") 
+				== -1)
+				return -1;
+			break;
+		case STAT_NOT_IMPLEMENTED:
+			if (write_str(msgsock, "501 Not Implemented\r\n") == -1)
+				return -1;
+			break;
+		case STAT_BAD_GATEWAY:
+			if (write_str(msgsock, "502 Bad Gateway\r\n") == -1)
+				return -1;
+			break;
+		case STAT_SERVICE_UNAVAILABLE:
+			if (write_str(msgsock, "503 Service Unavailable\r\n") 
+				== -1)
+				return -1;
+			break;
+		default:
+			return -1;
+	}
+
+	/* Date header */
+	if (write_str(msgsock, "Date: ") == -1)
+		return -1;
+
+	len = strlen(ctime(&resp->curr_date));
+	if (write(msgsock, ctime(&resp->curr_date), len - 1) != len - 1)
+		return -1;
+
+	if (write_str(msgsock, CRLF) == -1)
+		return -1;
+
+	/* Server header */
+	if (write_str(msgsock, "Server: ") == -1)
+		return -1;
+
+	if (write_str(msgsock, SERVER_NAME) == -1)
+		return -1;
+
+	if (write_str(msgsock, CRLF) == -1)
+		return -1;
+
+	/* Last Modified header */
+	if (resp->status == STAT_OK && cgi == NOT_SPECIFIED) {
+		if (write_str(msgsock, "Last-Modified: ") == -1)
+			return -1;
+
+		len = strlen(ctime(&resp->lm_date));
+		if (write(msgsock, ctime(&resp->lm_date), len - 1) != len - 1)
+			return -1;
+
+		if (write_str(msgsock, CRLF) == -1)
+			return -1;		
+	}
+
+	/* Content Type and Length header */
+	if (resp->status != STAT_OK || cgi == NOT_SPECIFIED) {
+		if (write_str(msgsock, "Content-Type: ") == -1)
+			return -1;
+
+		if (write_str(msgsock, CONTENT_TYPE) == -1)
+			return -1;
+
+		if (write_str(msgsock, CRLF) == -1)
+			return -1;
+
+		if (write_str(msgsock, "Content-Length: ") == -1)
+			return -1;
+
+		snprintf(str, 99, "%"PRIuMAX, resp->content_len);
+		str[99] = '\0';
+
+		if (write_str(msgsock, str) == -1)
+			return -1;
+
+		if (write_str(msgsock, CRLF) == -1)
+			return -1;		
+
+		/* CRLF between headers and entity body */
+		if (write_str(msgsock, CRLF) == -1)
+			return -1;
+	}
+
+	return 0;
+}
+
+/* return 0 on success, otherwise -1 */
+static int
+write_str(int msgsock, char *str) {
+	int len;
+
+	len = strlen(str);
+	if (write(msgsock, str, len) != len)
+		return -1;
+	return 0;
+}
+
+static void
+send_content(int msgsock, RESPONSE *resp, CGI_ENV *cgi, int is_cgi) {
+	char buff[CONTENT_BUFSIZE];
+	int fd;
+	int n;
+
+	/* error */
+	if (resp->status != STAT_OK) {
+		send_err_content(msgsock, resp->status);
+		return;
+	}
+
+	/* cgi */
+	if (is_cgi == SPECIFIED) {
+		cgi_exec(msgsock, cgi);
+		return;
+	}
+
+	/* file */
+	if (resp->ls_type == FILETYPE) {
+		if ((fd = open(resp->content_path, O_RDONLY)) < 0)
+			return;
+
+		while ((n = read(fd, buff, CONTENT_BUFSIZE)) > 0) {
+			if (write(msgsock, buff, n) != n)
+				return;
+		}
+
+		return;
+	}
+
+	/* directory */
+	send_dir_content(msgsock, resp->content_path);
+}
+
+static void
+send_dir_content(int msgsock, char *path) {
+	FTS *handle;
+	FTSENT *list, *child;
+	char *argv[] = {path, NULL};
+
+	if (write_str(msgsock, "<!DOCTYPE html>\r\n"
+							"<html>\r\n"
+							"\t<head>\r\n"
+							"\t\t<title>") == -1)
+		return;
+
+	if (write_str(msgsock, path) == -1)
+		return;
+
+	if (write_str(msgsock, "</title>\r\n"
+							"\t</head>\r\n"
+							"\t<body>\r\n"
+							"\t\t<h1>") == -1)
+		return;
+
+	if (write_str(msgsock, path) == -1)
+		return;
+
+	if (write_str(msgsock, "</h1>\r\n"
+							"\t\t<ul>\r\n") == -1)
+		return;
+
+
+	if ((handle = fts_open(argv, FTS_SEEDOT, fts_cmp)) == NULL) {
+		return;
+	}
+
+	while ((child = fts_read(handle)) != NULL) {
+		if (child->fts_info == FTS_ERR || child->fts_info == FTS_NS
+			|| child->fts_info == FTS_DC || child->fts_info == FTS_DNR) {
+			fts_close(handle);
+			return;
+		}
+
+		if (child->fts_info == FTS_D || child->fts_info == FTS_DOT) {
+			if ((list = fts_children(handle,0)) == NULL) {
+				if (errno == 0) { /* empty directory */
+					break;
+				} else {
+					fts_close(handle);
+					return;
+				}
+			}
+
+			for (; list != NULL; list = list->fts_link) {
+				if (list->fts_info == FTS_ERR || list->fts_info == FTS_NS || 
+					list->fts_info == FTS_DC || list->fts_info == FTS_DNR) {
+					fts_close(handle);
+					return;
+				}
+				if (list->fts_info == FTS_DP) {
+					continue;
+				}
+
+				if (list->fts_info == FTS_D || list->fts_info == FTS_DOT) {
+					if (write_str(msgsock, "\t\t\t<li><a href=\"") == -1)
+						return;
+
+					if (list->fts_info != FTS_DOT) {
+
+					if (write_str(msgsock, path + strlen(doc_root)) == -1)
+						return;
+
+					if (write_str(msgsock, "/") == -1)
+						return;
+					}
+
+					if (write_str(msgsock, list->fts_name) == -1)
+						return;
+
+					if (write_str(msgsock, "\">") == -1)
+						return;
+
+					if (write_str(msgsock, list->fts_name) == -1)
+						return;
+
+					if (write_str(msgsock, "</a></li>\r\n") == -1)
+						return;
+				} else {
+					if (write_str(msgsock, "\t\t\t<li>") == -1)
+						return;
+
+					if (write_str(msgsock, list->fts_name) == -1)
+						return;
+
+					if (write_str(msgsock, "</li>\r\n") == -1)
+						return;
+				}
+			}
+
+			if (fts_set(handle, child, FTS_SKIP) == -1) {
+				fts_close(handle);
+				return;
+			}
+		}
+	}
+
+	if (write_str(msgsock, "\t\t</ul>\r\n"
+							"\t</body>\r\n"
+							"</html>\r\n") == -1)
+		return;
+
+
+	fts_close(handle);
+}
