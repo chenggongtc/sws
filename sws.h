@@ -77,12 +77,12 @@ typedef struct {
 	METHOD method;
 	int status;
 	char uri[URI_BUFSIZE];
-	char raw_uri[URI_BUFSIZE];
+	char raw_uri[URI_BUFSIZE]; /* used for redirection */
 	char query[URI_BUFSIZE];
 	VER ver;
 	int is_ims;	/* NOT_SPECIFIED, SPECIFIED */
 	int is_cgi;
-	struct tm if_modified_since;
+	struct tm if_modified_since; /* (GMT) */
 } REQUEST;
 
 typedef struct {
@@ -103,12 +103,13 @@ typedef struct {
 typedef struct {
 	METHOD method;
 	int status;			/* status code, 3DIGIT */
-	time_t curr_date;			/* current date */
+	time_t curr_date;			/* current date(GMT) */
 	char *server;
-	time_t lm_date;		/* Last-Modified date */
+	time_t lm_date;		/* Last-Modified date(GMT) */
 	char *content_type;
 	uintmax_t content_len;		/* size in bytes of the data returned*/
 	char content_path[PATH_MAX];	/* the path of the content */
+	char raw_uri[URI_BUFSIZE]; /* used for redirection */
 	int ls_type;		/* flag for dir list */
 } RESPONSE;
 
@@ -117,7 +118,7 @@ typedef struct {
 	uintmax_t size;
 	char l_addr[INET6_ADDRSTRLEN];
 	char l_line[MAX_REQUEST_LEN];
-	time_t l_time;
+	time_t l_time; /* Request time(GMT) */
 } LOG;
 
 extern LOG log_info;
@@ -143,6 +144,9 @@ void log_sws(LOG *);
 /* error.c */
 int err_length(int);
 void send_err_content(int, int);
+
+/* utils.c */
+int write_str(int, char *);
 #endif
 
 

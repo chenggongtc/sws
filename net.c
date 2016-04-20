@@ -43,6 +43,8 @@ start_server()
 
 	on = 1;
 
+	bzero(client_ip, sizeof(client_ip));
+
 	if (server_addr == NULL) {	/* listen all ipv4 and ipv6 addresses */
 		if ((sock = socket(AF_INET6, SOCK_STREAM, 0)) == -1) {
 			perror("socket() error");
@@ -119,7 +121,8 @@ start_server()
 	}
 
 	/* prevent child processes from becoming zombies */
-	if (signal(SIGCHLD, chldHandler) == SIG_ERR) {
+	if (signal(SIGCHLD, chldHandler) == SIG_ERR ||
+		signal(SIGPIPE, SIG_IGN) == SIG_ERR) {
 		perror("signal() error");
 		exit(EXIT_FAILURE);
 	}
@@ -184,25 +187,28 @@ ACCAGAIN:
 			ini_request(&req);
 			ini_response(&resp);
 			ini_cgi(&cgi);
+
 			req_parser(msgsock, &req, &log_info);
 			cgi_parser(&cgi, &req, client_ip);
 			response(msgsock, &resp, &req, &cgi, &log_info);
-			
-			printf("status: %d, method: %d, uri: %s, query: %s, iscgi: %d, isims: %d, ims: %s\n", 
-			req.status, req.method, req.uri, req.query, req.is_cgi, req.is_ims, asctime(&req.if_modified_since));
 
-			printf("curr:%s",ctime(&resp.curr_date));
-			printf("lm:%s",ctime(&resp.lm_date));
-			printf("status: %d, method: %d, server: %s, type: %s, len: %"PRIuMAX", path: %s, lstype: %d\n\n",
-				resp.status, resp.method, resp.server, resp.content_type, resp.content_len, resp.content_path, resp.ls_type);
+			log_sws(&log_info);
+			
 			close(msgsock);
 		} else {
 			if ((p = fork()) < 0) {
 				close(msgsock);
 			} else if (p == 0) {	/* child */
 				ini_request(&req);
-				req_parser(msgsock, &req, &log_info);
+				ini_response(&resp);
+				ini_cgi(&cgi);
 
+				req_parser(msgsock, &req, &log_info);
+				cgi_parser(&cgi, &req, client_ip);
+				response(msgsock, &resp, &req, &cgi, &log_info);
+
+				log_sws(&log_info);
+				
 				close(msgsock);
 				_exit(EXIT_SUCCESS);
 			} else	/* parent */

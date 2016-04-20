@@ -18,6 +18,7 @@ err_length(int status_code)
 			"\t</head>\r\n"
 			"\t<body>\r\n"
 			"\t\t<h1>Moved Permanently</h1>\r\n"
+			"\t\t<p>You can find the link </p><a href=\"\">here</a>\r\n"
 			"\t</body>\r\n"
 			"</html>\r\n");
 	case STAT_MOVED_TEMPORARILY:
@@ -28,6 +29,7 @@ err_length(int status_code)
 			"\t</head>\r\n"
 			"\t<body>\r\n"
 			"\t\t<h1>Moved Temporarily</h1>\r\n"
+			"\t\t<p>You can find the link </p><a href=\"\">here</a>\r\n"
 			"\t</body>\r\n"
 			"</html>\r\n");
 	case STAT_NOT_MODIFIED:
@@ -139,6 +141,7 @@ void
 send_err_content(int msgsock, int status_code)
 {
 	char *err_info;
+	
 	switch (status_code) {
 	case STAT_MOVED_PERMANENTLY:
 		err_info = "<!DOCTYPE html>\r\n"
@@ -148,8 +151,7 @@ send_err_content(int msgsock, int status_code)
 			"\t</head>\r\n"
 			"\t<body>\r\n"
 			"\t\t<h1>Moved Permanently</h1>\r\n"
-			"\t</body>\r\n"
-			"</html>\r\n";
+			"\t\t<p>You can find the link </p><a href=\"";
 		break;
 	case STAT_MOVED_TEMPORARILY:
 		err_info = "<!DOCTYPE html>\r\n"
@@ -159,8 +161,7 @@ send_err_content(int msgsock, int status_code)
 			"\t</head>\r\n"
 			"\t<body>\r\n"
 			"\t\t<h1>Moved Temporarily</h1>\r\n"
-			"\t</body>\r\n"
-			"</html>\r\n";
+			"\t\t<p>You can find the link </p><a href=\"";
 		break;
 	case STAT_NOT_MODIFIED:
 		err_info = "<!DOCTYPE html>\r\n"

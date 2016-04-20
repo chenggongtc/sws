@@ -3,10 +3,12 @@
 #include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include <sys/file.h>
 #include <sys/types.h>
 #include <sys/stat.h>
 #include <string.h>
+#include <time.h>
 #include <unistd.h>
 
 #include "sws.h"
@@ -22,66 +24,117 @@ ini_log(LOG  *log_info) {
 
 void 
 log_sws(LOG *log_info) {
-/*	struct tm *info;
-	char buf_time[20]; // max time size in format is 19
-	char *buff;
-	char stat[4];
-	char size[20];
+	int fd;
+	char str[50];
 	int len;
-	struct flock lock;
 
-	bzero(buf_time, 20);
-	memset(&lock, 0, sizeof lock);
+	bzero(str, sizeof(str));
 
-	if (log_info->l_time == (time_t)-1) {
-		strcpy(buf_time, "??:??:?? ?\?-?\?-????");
-	} else {
-		info = gmtime(&log_info->l_time);
-		strftime(buf_time, sizeof buf_time, "%H:%M:%S %m-%d-%Y",info);
+	if (dflag) {
+		if (strlen(log_info->l_addr) == 0)
+			printf("UNKNOW ");
+		else
+			printf("%s ", log_info->l_addr);
+
+		if (log_info->l_time == (time_t)(-1))
+			printf("UNKNOW ");
+		else
+			printf("%.24s ", ctime(&log_info->l_time));
+
+		if (strlen(log_info->l_line) == 0)
+			printf("\"UNKNOW\" ");
+		else
+			printf("\"%s\" ", log_info->l_line);
+
+		printf("%d ", log_info->status);
+
+		printf("%"PRIuMAX"\n", log_info->size);
+
+		fflush(stdout);
 	}
-	
-	if(!dflag && !lflag)
-		return;
 
-	// doing time 
-	if(dflag) {
-		printf("%s %s \"%s\" %d %d\n",log_info->l_addr, buf_time,
-		  log_info->l_line, log_info->l_req_stat, log_info->l_size);
-		return;
-	}
-	
-	if(lflag) {
-
-		sprintf(stat, "%d", log_info->l_req_stat);
-		sprintf(size, "%d ", log_info->l_size);
-
-		len = strlen(log_info->l_addr) + 1 +
-		      strlen(buf_time) + 1 +
-		      strlen(log_info->l_line) + 3 +
-		      strlen(stat) + 1 +
-		      strlen(size) + 2;
-	
-		buff = (char *)calloc(len + 1, sizeof (char));
-
-		sprintf(buff, "%s %s \"%s\" %s %s\r\n",
-			log_info->l_addr, buf_time, log_info->l_line,
-			stat, size);
-		buff[len] = '\0';
-		lock.l_type = F_WRLCK;
-		lock.l_start = 0;
-		lock.l_len = 0;
-		lock.l_whence = SEEK_END;
-		
-		if (fcntl(fd_log, F_SETLKW, &lock) == -1)
+	if (lflag) {
+		if ((fd = open(log_file, O_WRONLY | O_APPEND)) == -1)
 			return;
 
+		if (flock(fd, LOCK_EX) < 0) {
+			close(fd);
+			return;
+		}
 
-		if (write(fd_log, buff, len) < 0)
-			exit(EXIT_FAILURE);
+		if (strlen(log_info->l_addr) == 0) {
+			if (write_str(fd, "UNKNOW ") == -1) {
+				flock(fd, LOCK_UN);
+				close(fd);
+				return;
+			}
+		} else{
+			if (write_str(fd, log_info->l_addr) == -1){
+				flock(fd, LOCK_UN);
+				close(fd);
+				return;
+			}
+			if (write_str(fd, " ") == -1) {
+				flock(fd, LOCK_UN);
+				close(fd);
+				return;
+			}
+		}
+		if (log_info->l_time == (time_t)(-1)) {
+			if (write_str(fd, "UNKNOW ") == -1) {
+				flock(fd, LOCK_UN);
+				close(fd);
+				return;
+			}
+		} else {
+			strcpy(str, ctime(&log_info->l_time));
+			len = strlen(str) - 1;
+			if (write(fd, str, len) != len) {
+				flock(fd, LOCK_UN);
+				close(fd);
+				return;
+			}
+			if (write_str(fd, " ") == -1) {
+				flock(fd, LOCK_UN);
+				close(fd);
+				return;
+			}
+		}
+			
 
-		lock.l_type = F_UNLCK;
-		if (fcntl(fd_log, F_SETLKW, &lock) == -1)
-			exit(EXIT_FAILURE);
+		if (strlen(log_info->l_line) == 0) {
+			if (write_str(fd, "UNKNOW ") == -1) {
+				flock(fd, LOCK_UN);
+				close(fd);
+				return;
+			}
+		} else {
+			if (write_str(fd, "\"") == -1) {
+				flock(fd, LOCK_UN);
+				close(fd);
+				return;
+			}
+			if (write_str(fd, log_info->l_line) == -1) {
+				flock(fd, LOCK_UN);
+				close(fd);
+				return;
+			}
+			if (write_str(fd, "\" ") == -1) {
+				flock(fd, LOCK_UN);
+				close(fd);
+				return;
+			}
+		}
 
-	}	*/
+		snprintf(str, 50, "%d %"PRIuMAX"\n", log_info->status,
+											log_info->size);
+		if (write_str(fd, str) == -1) {
+			flock(fd, LOCK_UN);
+			close(fd);
+			return;
+		}
+
+		flock(fd, LOCK_UN);
+		close(fd);
+	}
 }

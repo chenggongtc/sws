@@ -24,14 +24,13 @@ static int convert_month(char *);
 /* response */
 static void resp_header_generator(RESPONSE *, REQUEST *);
 static void err_header_generator(RESPONSE *);
-static off_t dir_content_len(char *);
+static off_t dir_content_len(char *, char *);
 static int fts_cmp(const FTSENT **, const FTSENT **);
 static int cmp_lexico(const FTSENT *, const FTSENT *);
 static void gmt_transfer(time_t *);
 static int send_header(int, RESPONSE *, int);
-static int write_str(int, char *);
 static void send_content(int, RESPONSE *, CGI_ENV *, int);
-static void send_dir_content(int, char *);
+static void send_dir_content(int, char *, char *);
 
 #endif
 

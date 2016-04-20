@@ -104,6 +104,9 @@ cgi_exec(int msgsock, CGI_ENV *cgi)
 	char *a[]={NULL};
 	char path[PATH_MAX];
 	int fds[2];
+	int ch;
+
+	bzero(path, sizeof(path));
 
 	sprintf(path, "%s%s", cgi_dir, cgi->script_name + 9);
 	if (stat(path, &st) == -1) {
@@ -137,9 +140,8 @@ cgi_exec(int msgsock, CGI_ENV *cgi)
 			return;
 		}
 		
-		int b;
-		while (read(fds[0],&b,1)>0)
-		write(msgsock,&b,1);
+		while (read(fds[0], &ch, 1) > 0)
+			write(msgsock, &ch, 1);
 
 	} else {	/* child */
 		close(fds[0]);

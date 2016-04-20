@@ -46,6 +46,7 @@ ini_response(RESPONSE *resp)
 	resp->content_type = CONTENT_TYPE;
 	resp->content_len = 0;
 	bzero(resp->content_path, sizeof(resp->content_path));
+	bzero(resp->raw_uri, sizeof(resp->raw_uri));
 	resp->ls_type = FILETYPE;
 }
 
@@ -68,6 +69,9 @@ req_parser(int msgsock, REQUEST *req, LOG *log_info)
 	i = 0;
 	is_cr = 0;
 
+	bzero(if_modified_since, sizeof(if_modified_since));
+	bzero(buffer, sizeof(buffer));
+
 	timeout = clock();
 REQAGAIN:
 	while ((n = read(msgsock, &ch, 1)) > 0) {
@@ -81,6 +85,7 @@ REQAGAIN:
 				return;
 			}
 
+			gmt_transfer(&log_info->l_time);
 			req->status = STAT_BAD_REQUEST;
 			return;
 		}
@@ -92,6 +97,7 @@ REQAGAIN:
 					return;
 				}
 
+				gmt_transfer(&log_info->l_time);
 				req->status = STAT_BAD_REQUEST;
 				return;
 			}
@@ -110,7 +116,7 @@ REQAGAIN:
 			if (is_req_line == 0) { /* request line */
 				buffer[i] = '\n';
 				buffer[i + 1] = '\0';
-				/* remove tailing CRLF */
+				/* remove trailing CRLF */
 				strncpy(log_info->l_line, buffer, i - 1);
 				log_info->l_line[i] = '\0';
 
@@ -120,7 +126,9 @@ REQAGAIN:
 					if (time(&log_info->l_time) ==
 							(time_t)(-1)) {
 						req->status = STAT_INTERNAL_SERVER_ERROR;
-					}			
+					}
+
+					gmt_transfer(&log_info->l_time);	
 					return;
 				}
 
@@ -156,6 +164,7 @@ REQAGAIN:
 					return;
 				}
 
+				gmt_transfer(&log_info->l_time);
 				req->status = STAT_REQUEST_TIMEOUT;
 				return;
 			} else
@@ -167,6 +176,7 @@ REQAGAIN:
 			return;
 		}
 
+		gmt_transfer(&log_info->l_time);
 		req->status = STAT_INTERNAL_SERVER_ERROR;
 		return;
 	}
@@ -184,6 +194,7 @@ REQAGAIN:
 		return;
 	}
 
+	gmt_transfer(&log_info->l_time);
 }
 
 void
@@ -219,6 +230,11 @@ req_line_parser(char *req_line, REQUEST *req)
 	int n;
 	int ret_val;
 
+	bzero(method, sizeof(method));
+	bzero(garbage, sizeof(garbage));
+	bzero(uri, sizeof(uri));
+	bzero(version, sizeof(version));
+	
 	if ((n = sscanf(req_line,
 			/*Method   SP URI   SP HTTP-Version CRLF */
 			"%6[A-Z]%c %4095s%c %8[HTP/.019] %1[^\r\n]",
@@ -328,6 +344,10 @@ ims_parser(char *if_modified_since, REQUEST *req)
 	int len;
 	char sp1, sp2, sp3, sp4, sp5; /* acsii space (32) */
 
+	bzero(wkday, sizeof(wkday));
+	bzero(month, sizeof(month));
+	bzero(garbage, sizeof(garbage));
+	
 	if (req->ver == HTTP09 || strcmp(if_modified_since, "") == 0) {
 		return -1;
 	}
@@ -717,8 +737,11 @@ resp_header_generator(RESPONSE *resp, REQUEST *req) {
 	char index_path[PATH_MAX];
 	time_t ims;
 
+	bzero(index_path, sizeof(index_path));
+
 	resp->method = req->method;
 	resp->status = req->status;
+	strcpy(resp->raw_uri, req->raw_uri);
 	time(&resp->curr_date);
 	gmt_transfer(&resp->curr_date);
 
@@ -793,8 +816,32 @@ resp_header_generator(RESPONSE *resp, REQUEST *req) {
 		return;
 	}
 
+	 /* read permission denied */
+	if (access(resp->content_path, R_OK) != 0) {
+		resp->status = STAT_FORBIDDEN;
+		err_header_generator(resp);
+		return;
+	}
+
 	len = strlen(resp->content_path);
-	if (len < PATH_MAX - 1 && resp->content_path[len - 1] != '/') {
+
+	/* redirect directory without trailing slash */
+	if (len > 0 && resp->content_path[len - 1] != '/') {
+		len = strlen(resp->raw_uri);
+		if (len >= URI_BUFSIZE - 1) {
+			resp->status = STAT_BAD_REQUEST;
+			err_header_generator(resp);
+			return;
+		}
+		strcat(resp->raw_uri, "/");
+		resp->status = STAT_MOVED_PERMANENTLY;
+		err_header_generator(resp);
+		resp->content_len += (uintmax_t)(len + 1);
+		return;
+	}
+
+	if (len > 0 && len < PATH_MAX - 1 && 
+		resp->content_path[len - 1] != '/') {
 		snprintf(index_path, PATH_MAX - 1, "%s/index.html", 
 				resp->content_path);
 	} else {
@@ -832,6 +879,13 @@ resp_header_generator(RESPONSE *resp, REQUEST *req) {
 					return;
 				}
 			}
+
+			len = strlen(req->raw_uri);
+			if (len > 0 && req->raw_uri[len - 1] != '/') {
+				resp->status = STAT_MOVED_PERMANENTLY;
+				err_header_generator(resp);
+				return;
+			}
 			return;
 		}
 		
@@ -841,17 +895,11 @@ resp_header_generator(RESPONSE *resp, REQUEST *req) {
 	 * files in the directory.
 	 */
 
-	 /* read permission denied */
-	if (access(resp->content_path, R_OK) != 0) {
-		resp->status = STAT_FORBIDDEN;
-		err_header_generator(resp);
-		return;
-	}
-
 	resp->ls_type = DIRTYPE;
 	resp->lm_date = st.st_mtime;
 	gmt_transfer(&resp->lm_date);
-	resp->content_len = (uintmax_t)dir_content_len(resp->content_path);
+	resp->content_len = (uintmax_t)dir_content_len(resp->content_path,
+												resp->raw_uri);
 	if (resp->content_len == -1) {
 		resp->status = STAT_INTERNAL_SERVER_ERROR;
 		err_header_generator(resp);
@@ -868,7 +916,7 @@ err_header_generator(RESPONSE *resp) {
  * otherwise return the length of the content
  */
 static off_t
-dir_content_len(char *path) {
+dir_content_len(char *path, char *raw_uri) {
 	off_t len;
 	off_t frame, file, directory;
 	FTS *handle;
@@ -890,7 +938,7 @@ dir_content_len(char *path) {
 	file = (off_t)strlen("\t\t\t<li></li>\r\n");
 	directory = (off_t)strlen("\t\t\t<li><a href=\"\"></a></li>\r\n");
 
-	len = frame + 2 * strlen(path);
+	len = frame + 2 * strlen(raw_uri);
 
 	if ((handle = fts_open(argv, FTS_SEEDOT, fts_cmp)) == NULL) {
 		return -1;
@@ -1001,6 +1049,8 @@ send_header(int msgsock, RESPONSE *resp, int cgi) {
 	int len;
 	char str[100];
 
+	bzero(str, sizeof(str));
+
 	/* status line */
 	if (write_str(msgsock, "HTTP/1.0 ") == -1)
 		return -1;
@@ -1110,6 +1160,18 @@ send_header(int msgsock, RESPONSE *resp, int cgi) {
 			return -1;		
 	}
 
+	if (resp->status == STAT_MOVED_PERMANENTLY ||
+		resp->status == STAT_MOVED_TEMPORARILY) {
+		if (write_str(msgsock, "Location: ") == -1)
+			return -1;
+
+		if (write_str(msgsock, resp->raw_uri) == -1)
+			return -1;
+
+		if (write_str(msgsock, CRLF) == -1)
+			return -1;		
+	}
+
 	/* Content Type and Length header */
 	if (resp->status != STAT_OK || cgi == NOT_SPECIFIED) {
 		if (write_str(msgsock, "Content-Type: ") == -1)
@@ -1141,26 +1203,28 @@ send_header(int msgsock, RESPONSE *resp, int cgi) {
 	return 0;
 }
 
-/* return 0 on success, otherwise -1 */
-static int
-write_str(int msgsock, char *str) {
-	int len;
-
-	len = strlen(str);
-	if (write(msgsock, str, len) != len)
-		return -1;
-	return 0;
-}
-
 static void
 send_content(int msgsock, RESPONSE *resp, CGI_ENV *cgi, int is_cgi) {
 	char buff[CONTENT_BUFSIZE];
+	char *str;
 	int fd;
 	int n;
 
+	bzero(buff, sizeof(buff));
 	/* error */
 	if (resp->status != STAT_OK) {
 		send_err_content(msgsock, resp->status);
+		if (resp->status == STAT_MOVED_TEMPORARILY ||
+			resp->status == STAT_MOVED_PERMANENTLY) {
+			if (write_str(msgsock, resp->raw_uri) == -1)
+				return;
+
+			str = "\">here</a>\r\n"
+				"\t</body>\r\n"
+				"</html>\r\n";
+			write_str(msgsock, str);
+			return;
+		}
 		return;
 	}
 
@@ -1184,11 +1248,11 @@ send_content(int msgsock, RESPONSE *resp, CGI_ENV *cgi, int is_cgi) {
 	}
 
 	/* directory */
-	send_dir_content(msgsock, resp->content_path);
+	send_dir_content(msgsock, resp->content_path, resp->raw_uri);
 }
 
 static void
-send_dir_content(int msgsock, char *path) {
+send_dir_content(int msgsock, char *path, char *raw_uri) {
 	FTS *handle;
 	FTSENT *list, *child;
 	char *argv[] = {path, NULL};
@@ -1199,7 +1263,7 @@ send_dir_content(int msgsock, char *path) {
 							"\t\t<title>") == -1)
 		return;
 
-	if (write_str(msgsock, path) == -1)
+	if (write_str(msgsock, raw_uri) == -1)
 		return;
 
 	if (write_str(msgsock, "</title>\r\n"
@@ -1208,7 +1272,7 @@ send_dir_content(int msgsock, char *path) {
 							"\t\t<h1>") == -1)
 		return;
 
-	if (write_str(msgsock, path) == -1)
+	if (write_str(msgsock, raw_uri) == -1)
 		return;
 
 	if (write_str(msgsock, "</h1>\r\n"
@@ -1247,23 +1311,24 @@ send_dir_content(int msgsock, char *path) {
 					continue;
 				}
 
+				if (strlen(list->fts_name) > 0 && list->fts_name[0] == '.' &&
+					list->fts_info != FTS_DOT)
+					continue;
+
 				if (list->fts_info == FTS_D || list->fts_info == FTS_DOT) {
 					if (write_str(msgsock, "\t\t\t<li><a href=\"") == -1)
 						return;
 
 					if (list->fts_info != FTS_DOT) {
 
-					if (write_str(msgsock, path + strlen(doc_root)) == -1)
-						return;
-
-					if (write_str(msgsock, "/") == -1)
-						return;
+						if (write_str(msgsock, "./") == -1)
+							return;
 					}
 
 					if (write_str(msgsock, list->fts_name) == -1)
 						return;
 
-					if (write_str(msgsock, "\">") == -1)
+					if (write_str(msgsock, "/\">") == -1)
 						return;
 
 					if (write_str(msgsock, list->fts_name) == -1)

@@ -40,15 +40,19 @@ main(int argc, char **argv)
 	(void)setlocale(LC_ALL, "");
 	port = DEFAULT_PORT;
 
+	bzero(doc_root, sizeof(doc_root));
+	bzero(cgi_dir, sizeof(cgi_dir));
+	bzero(log_file, sizeof(log_file));
+
 	while ((opt = getopt(argc, argv, "c:dhi:l:p:")) != -1) {
 		switch (opt) {
 		case 'c':
 			cflag = 1;
-			/* last character reserved for tailing slash */
+			/* last character reserved for trailing slash */
 			strncpy(cgi_dir, optarg, PATH_MAX - 2);
 			cgi_dir[PATH_MAX - 1] = '\0';
 			len = strlen(cgi_dir);
-			/* add a tailing slash */
+			/* add a trailing slash */
 			if (len > 0 && cgi_dir[len - 1] != '/')
 				cgi_dir[len] = '/';
 			break;
@@ -85,11 +89,11 @@ main(int argc, char **argv)
 		return EXIT_FAILURE;
 	}
 
-	/* last character reserved for tailing slash */
+	/* last character reserved for trailing slash */
 	strncpy(doc_root, argv[0], PATH_MAX - 2);
 	doc_root[PATH_MAX - 1] = '\0';
 	len = strlen(doc_root);
-	/* add a tailing slash */
+	/* add a trailing slash */
 	if (len > 0 && doc_root[len - 1] != '/')
 		doc_root[len] = '/';
 
@@ -114,10 +118,10 @@ main(int argc, char **argv)
 		return EXIT_FAILURE;
 	}
 
-	/* debugging */
+	/* debugging 
 	dflag = 1;
 	lflag = 0;
-
+*/
 	start_server();
 
 	return EXIT_SUCCESS;
