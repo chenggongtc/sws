@@ -10,11 +10,10 @@
 #include <time.h>
 
 #define SERVER_NAME "fws/1.0"
-#define CONTENT_TYPE "text/html"
-#define CGI_GATEWAY "CGI/1.1"
-
-#define SERVER_NAME "fws/1.0"
-#define CONTENT_TYPE "text/html"
+#define CONTENT_TYPE_HTML "text/html"
+#define CONTENT_TYPE_CSS "text/css"
+#define CONTENT_TYPE_JS "text/javascript"
+#define CONTENT_TYPE "text/plain"
 #define CGI_GATEWAY "CGI/1.1"
 
 #define LWS " "

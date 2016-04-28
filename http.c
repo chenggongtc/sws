@@ -806,6 +806,20 @@ resp_header_generator(RESPONSE *resp, REQUEST *req) {
 				return;
 			}
 		}
+
+		len = strlen(resp->content_path);
+		if (len > 3 && strcmp(resp->content_path + len - 3,
+								".js") == 0) {
+			resp->content_type = CONTENT_TYPE_JS;
+		} else if (len > 4 && strcmp(resp->content_path + len - 4,
+									".css") == 0) {
+			resp->content_type = CONTENT_TYPE_CSS;
+		} else if (len > 5 && strcmp(resp->content_path + len - 5,
+									".html") == 0) {
+			resp->content_type = CONTENT_TYPE_HTML;
+		} else {
+			resp->content_type = CONTENT_TYPE;
+		}
 		return;
 	}
 
@@ -886,6 +900,8 @@ resp_header_generator(RESPONSE *resp, REQUEST *req) {
 				err_header_generator(resp);
 				return;
 			}
+
+			resp->content_type = CONTENT_TYPE_HTML;
 			return;
 		}
 		
@@ -905,11 +921,14 @@ resp_header_generator(RESPONSE *resp, REQUEST *req) {
 		err_header_generator(resp);
 	}
 
+	resp->content_type = CONTENT_TYPE_HTML;
+
 }
 
 static void
 err_header_generator(RESPONSE *resp) {
 	resp->content_len = (uintmax_t)err_length(resp->status);
+	resp->content_type = CONTENT_TYPE_HTML;
 }
 
 /* return -1 when internal server errors occur,
@@ -1177,7 +1196,7 @@ send_header(int msgsock, RESPONSE *resp, int cgi) {
 		if (write_str(msgsock, "Content-Type: ") == -1)
 			return -1;
 
-		if (write_str(msgsock, CONTENT_TYPE) == -1)
+		if (write_str(msgsock, resp->content_type) == -1)
 			return -1;
 
 		if (write_str(msgsock, CRLF) == -1)
